@@ -1,0 +1,17 @@
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 虚拟环境 (非常重要，不要传这个！)
+venv/
+.env
+
+# 数据库 (本地数据库不要传)
+db.sqlite3
+*.log
+
+# PyCharm 配置
+.idea/
+
+# 媒体文件 (图片通常不传代码库，或者只传少量测试图)
+media/
