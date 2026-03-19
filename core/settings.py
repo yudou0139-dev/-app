@@ -44,7 +44,7 @@ INSTALLED_APPS = [
 
     'users',  # 用户模块
     'products',  # 商品模块
-    'social',  # 社交模块
+    #'social',  # 社交模块（删除）
     'recommend',  # 推荐模块
     # --- 新增内容结束 ---
 ]

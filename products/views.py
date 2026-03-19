@@ -3,7 +3,7 @@ from rest_framework.response import Response
 from .models import Product
 from .serializers import ProductSerializer
 from recommend.algo import item_based_recommendation
-
+from .models import UserBehavior
 
 # 接口1：获取所有商品列表
 class ProductListView(APIView):
@@ -29,3 +29,23 @@ class RecommendView(APIView):
 
         serializer = ProductSerializer(products, many=True)
         return Response(serializer.data)
+
+
+# 接口3：记录用户行为 (给推荐算法喂数据)
+class UserBehaviorView(APIView):
+    def post(self, request):
+        # 实际项目中通常从 request.user.id 获取，为了方便App联调先从传参获取
+        user_id = request.data.get('user_id')
+        product_id = request.data.get('product_id')
+        action_type = request.data.get('action_type') # 1浏览 2收藏 3加购 4购买
+
+        if not all([user_id, product_id, action_type]):
+            return Response({'error': '参数不完整'}, status=400)
+
+        # 写入数据库，算法会自动去这个表里抓取数据
+        UserBehavior.objects.create(
+            user_id=user_id,
+            product_id=product_id,
+            action_type=action_type
+        )
+        return Response({'message': '行为记录成功'})
