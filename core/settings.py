@@ -25,8 +25,7 @@ SECRET_KEY = 'django-insecure-y5189p=+appi$yyn_w##1whn8a++4198w6m#q=ml4js@a=7dz*
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
-
+ALLOWED_HOSTS = ['*']
 
 # Application definition
 
@@ -120,13 +119,11 @@ AUTH_PASSWORD_VALIDATORS = [
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
-LANGUAGE_CODE = 'en-us'
-
-TIME_ZONE = 'UTC'
-
+LANGUAGE_CODE = 'zh-hans'  # 把后台变成纯中文！
+TIME_ZONE = 'Asia/Shanghai' # 切换到北京/上海时区
 USE_I18N = True
-
-USE_TZ = True
+USE_L10N = True
+USE_TZ = False # 关闭时区敏感（对于毕设项目，设为 False 存入数据库的时间最直观）
 
 
 # Static files (CSS, JavaScript, Images)

@@ -1,11 +1,15 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from rest_framework.permissions import AllowAny # +++ 1. 新增导入：允许任何人访问的权限类 +++
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate, login
 from .models import UserProfile
 
 class RegisterView(APIView):
     """用户注册接口"""
+    # +++ 2. 发放免死金牌：允许未登录访问，且不校验跨站令牌(CSRF) +++
+    permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
         username = request.data.get('username')
@@ -23,6 +27,9 @@ class RegisterView(APIView):
 
 class LoginView(APIView):
     """用户登录接口"""
+    # +++ 3. 登录接口同样需要免死金牌 +++
+    permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
         username = request.data.get('username')
@@ -42,6 +49,10 @@ class LoginView(APIView):
 
 class UpdateProfileView(APIView):
     """完善信息并解锁 VIP 接口"""
+    # +++ 4. 因为咱们目前是通过传 user_id 来认人，所以这里也先放开拦截，方便测试打通 +++
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
     def post(self, request):
         # 实际开发中通常用 Token 获取用户，为了方便您目前 Postman 调试，先直接传 user_id
         user_id = request.data.get('user_id')
