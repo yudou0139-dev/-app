@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Product, ProductImage, Category, Address, Order, OrderItem, CartItem, ProductReview, Message
+from .models import Product, ProductImage,ProductDetailImage,ProductSKU, Category, Address, Order, OrderItem, CartItem, ProductReview, Message
 
 
 # +++ 1. 新增：商品副图序列化器 +++
@@ -7,18 +7,28 @@ class ProductImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductImage
         fields = ['id', 'image', 'color_mark'] # 把图片地址和颜色标签暴露给前端
+# 详情图序列化器
+class ProductDetailImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductDetailImage
+        fields = ['id', 'image', 'order']
 
+class ProductSKUSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductSKU
+        fields = ['color', 'size', 'stock']
 # 2. 修改：原来的商品序列化器
 class ProductSerializer(serializers.ModelSerializer):
     # +++ 核心修改：把副图列表嵌套进来，many=True 代表这是一个数组 +++
     images = ProductImageSerializer(many=True, read_only=True)
-
+    detail_images = ProductDetailImageSerializer(many=True, read_only=True)# 详情图
+    skus = ProductSKUSerializer(many=True, read_only=True)    # +++ 挂载 SKU 数组，让前端能拿到每种颜色的具体库存 +++
     class Meta:
         model = Product
         # +++ 确保 available_colors, available_sizes 和 images 都加到了 fields 列表里 +++
         fields = [
             'id', 'name', 'price', 'image', 'description', 'tags',
-            'available_colors', 'available_sizes', 'images'
+            'stock','available_colors', 'available_sizes', 'images', 'detail_images', 'skus'
         ]
 
 # 新增分类序列化器

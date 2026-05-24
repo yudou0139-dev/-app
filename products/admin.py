@@ -1,7 +1,9 @@
+import openpyxl
+from django.http import HttpResponse
+from django.utils import timezone
 from django.contrib import admin
-from .models import Category, Product, ProductImage, UserBehavior, Address, Order, OrderItem, CartItem,ProductReview, Message
 from django.db.models import Sum, F, FloatField
-
+from .models import Category, Product, ProductImage, ProductDetailImage, ProductSKU, UserBehavior, Address, Order, OrderItem, CartItem, ProductReview, Message
 # 1. 注册分类
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
@@ -12,16 +14,95 @@ class CategoryAdmin(admin.ModelAdmin):
 class ProductImageInline(admin.TabularInline):
     model = ProductImage
     extra = 3
+# 新增一个详情图的内联配置
+class ProductDetailImageInline(admin.TabularInline):
+    model = ProductDetailImage
+    extra = 2  # 默认提供2个空白上传框
 
+# 1. 新增 SKU 的内联配置
+class ProductSKUInline(admin.TabularInline):
+    model = ProductSKU
+    extra = 0  # 不默认添加空行，用我们下面的动作一键生成
 
 # 3. 注册商品
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     # 告诉 Django 后台要展示哪些列
-    list_display = ['name', 'category', 'price', 'get_total_sales', 'get_total_revenue', 'created_at']
+    list_display = ['name', 'category', 'price', 'stock','get_total_sales', 'get_total_revenue', 'created_at']
     list_filter = ['category', 'created_at']
     search_fields = ['name', 'description']
-    inlines = [ProductImageInline]
+    list_editable = ['stock', 'price']    # 允许在列表页直接编辑库存和价格
+
+    inlines = [ProductImageInline, ProductDetailImageInline, ProductSKUInline]
+
+    actions = ['generate_skus', 'export_sku_summary_excel']
+
+    @admin.action(description='⚡ 根据颜色和尺码自动生成SKU规格')
+    def generate_skus(self, request, queryset):
+        for product in queryset:
+            # 提取颜色和尺码
+            colors = [c.strip() for c in product.available_colors.split(',')] if product.available_colors else []
+            sizes = [s.strip() for s in product.available_sizes.split(',')] if product.available_sizes else []
+
+            for c in colors:
+                for s in sizes:
+                    # 如果该组合不存在，则创建，默认库存为 0
+                    ProductSKU.objects.get_or_create(product=product, color=c, size=s)
+
+        self.message_user(request, "✅ SKU 规格已成功生成，请进入商品编辑页下方分配具体库存数量！")
+
+    # +++ 本次新增：导出 Excel 核心逻辑 +++
+    @admin.action(description='📊 导出选中商品的 SKU 销售统计 (Excel)')
+    def export_sku_summary_excel(self, request, queryset):
+        # 1. 创建 Excel 工作簿
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "SKU销售统计"
+
+        # 2. 写入表头
+        ws.append(['商品ID', '商品名称', '颜色', '尺码', '累计销量(件)', '剩余库存(件)', '累计销售额(元)'])
+
+        # 3. 遍历选中的商品
+        for product in queryset:
+            # 获取该商品所有的 SKU
+            for sku in product.skus.all():
+                # 查询该 SKU 在有效订单（已付款、已发货、已完成）中的销售记录
+                valid_items = OrderItem.objects.filter(
+                    product=product,
+                    selected_color=sku.color,
+                    selected_size=sku.size,
+                    order__status__in=[2, 3, 4]
+                )
+
+                # 聚合计算：总销量 和 总销售额
+                aggregated = valid_items.aggregate(
+                    total_qty=Sum('quantity'),
+                    total_rev=Sum(F('price') * F('quantity'), output_field=FloatField())
+                )
+
+                sold_count = aggregated['total_qty'] or 0
+                revenue = aggregated['total_rev'] or 0.0
+
+                # 将数据追加到 Excel 中
+                ws.append([
+                    product.id,
+                    product.name,
+                    sku.color,
+                    sku.size,
+                    sold_count,
+                    sku.stock,
+                    round(revenue, 2)  # 保留两位小数
+                ])
+
+        # 4. 生成响应返回文件，触发浏览器下载
+        filename = f"SKU_Sales_Summary_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        response = HttpResponse(
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        wb.save(response)
+
+        return response
 
     def get_total_sales(self, obj):
         """动态计算：累计销量 (只计算已付款及之后的订单)"""
@@ -51,7 +132,6 @@ class ProductAdmin(admin.ModelAdmin):
         return f"￥{total:.2f}" if total else "￥0.00"
 
     get_total_revenue.short_description = '💰 总销售额'
-
 
 # 4. 注册行为记录
 @admin.register(UserBehavior)

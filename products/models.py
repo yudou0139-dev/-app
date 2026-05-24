@@ -28,6 +28,7 @@ class Product(models.Model):
     tags = models.CharField(max_length=200, blank=True, verbose_name="风格标签")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="上架时间")
 
+    stock = models.IntegerField(default=100, verbose_name="库存")
     # +++ 【本次新增】商品规格信息 +++
     # 前端就是读取这里的数据来生成那些带有红框的选中按钮的
     available_colors = models.CharField(max_length=255, blank=True, null=True,
@@ -38,9 +39,36 @@ class Product(models.Model):
     def __str__(self):
         return self.name
 
+    # 动汇总 SKU 库存到总库存 +++
+    def save(self, *args, **kwargs):
+        # 如果商品已经存在于数据库中（有主键 pk）
+        if self.pk:
+            from django.db.models import Sum
+            # 汇总所有关联 SKU 的库存总和
+            total = self.skus.aggregate(Sum('stock'))['stock__sum']
+            # 如果算出来有值就更新，没有就算作 0
+            self.stock = total if total is not None else 0
+        super().save(*args, **kwargs)
+
     class Meta:
         verbose_name = "商品信息"
         verbose_name_plural = verbose_name
+
+class ProductSKU(models.Model):
+    """商品规格库存表 (SKU)"""
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='skus', verbose_name="所属商品")
+    color = models.CharField(max_length=50, verbose_name="颜色")
+    size = models.CharField(max_length=50, verbose_name="尺码")
+    stock = models.IntegerField(default=0, verbose_name="库存数量")
+
+    class Meta:
+        verbose_name = "规格库存"
+        verbose_name_plural = verbose_name
+        # 确保同一个商品下，“颜色+尺码”的组合是唯一的
+        unique_together = ('product', 'color', 'size')
+
+    def __str__(self):
+        return f"{self.product.name} - {self.color} / {self.size} (库存: {self.stock})"
 
 
 # +++ 【本次新增】3. 商品副图表（实现一对多关联的核心）+++
@@ -59,6 +87,20 @@ class ProductImage(models.Model):
     class Meta:
         verbose_name = "商品副图"
         verbose_name_plural = verbose_name
+
+class ProductDetailImage(models.Model):
+    """商品详情图 (专用于详情页底部的长图展示)"""
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='detail_images', verbose_name="所属商品")
+    image = models.ImageField(upload_to='products/details/', verbose_name="详情图片")
+    order = models.IntegerField(default=0, verbose_name="展示顺序(从小到大)")
+
+    class Meta:
+        verbose_name = "商品详情图"
+        verbose_name_plural = verbose_name
+        ordering = ['order']  # 按照 order 字段从小到大排序，保证长图拼接顺序正确
+
+    def __str__(self):
+        return f"{self.product.name} - 详情图"
 
 
 # 4. 用户行为记录表 (核心！协同过滤算法的数据源)

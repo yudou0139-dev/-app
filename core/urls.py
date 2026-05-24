@@ -5,7 +5,7 @@ from django.conf.urls.static import static
 
 # +++ 修改导入：在这里加上了 CategoryListView +++
 from users.views import RegisterView, LoginView, UpdateProfileView
-from products.views import ProductListView, RecommendView, UserBehaviorView, CategoryListView, FavoriteListView, AddressView, OrderView, OrderPaymentView, CartView, ProductReviewView,MessageView
+from products.views import ProductListView, RecommendView, UserBehaviorView, CategoryListView, FavoriteListView, AddressView, OrderView, OrderPaymentView, CartView, ProductReviewView,MessageView, RelatedProductView
 urlpatterns = [
     path('admin/', admin.site.urls),
 
@@ -27,5 +27,7 @@ urlpatterns = [
     path('api/cart/', CartView.as_view()),    #加上这个购物车接口
     path('api/reviews/', ProductReviewView.as_view()),
     path('api/messages/', MessageView.as_view()),
+
+    path('api/products/related/', RelatedProductView.as_view()),# 详情页底部的关联推荐接口
 
 ] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

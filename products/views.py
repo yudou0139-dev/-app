@@ -2,14 +2,14 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from .models import Product, UserBehavior, Category, Address, Order, OrderItem, CartItem,ProductReview, Message
-from .serializers import ProductSerializer, CategorySerializer, AddressSerializer, OrderSerializer, CartItemSerializer,ProductReviewSerializer, MessageSerializer
-from recommend.algo import item_based_recommendation
+from .serializers import ProductSerializer, CategorySerializer, AddressSerializer, OrderSerializer, CartItemSerializer,ProductReviewSerializer, MessageSerializer,ProductSKU
+from recommend.algo import item_based_recommendation, get_related_products
 from django.db import transaction
 import datetime
 import random
 from django.utils import timezone
 from datetime import timedelta
-from django.db.models import Q
+from django.db.models import Q,F
 
 # +++ 接口0 获取所有商品分类 +++
 class CategoryListView(APIView):
@@ -188,14 +188,16 @@ class OrderView(APIView):
     # 提前防范：订单接口也要清空认证，否则等下提交订单也会报一模一样的错！
     authentication_classes = []
 
+    @transaction.atomic  # 加事务，防止超时取消时回滚库存出错
     def get(self, request):
         """获取我的订单列表，并包含 30 分钟超时检测"""
         user_id = request.query_params.get('user_id')
+        if user_id:
+            orders = Order.objects.filter(user_id=user_id).order_by('-created_at')
+        else:
+            orders = Order.objects.all().order_by('-created_at')
 
-        # 先把该用户所有的订单拿出来
-        orders = Order.objects.filter(user_id=user_id).order_by('-created_at')
-
-        # 核心商业逻辑：懒加载检查超时订单
+        # 懒加载检查超时订单
         now = timezone.now()
         for order in orders:
             # 如果是“待支付”状态 (status == 1)
@@ -205,13 +207,27 @@ class OrderView(APIView):
                     order.status = 5  # 5 代表“已取消”
                     order.save()  # 更新进数据库
 
+                    # +++ 超时取消：把库存加回到特定的 SKU 里 +++
+                    for item in order.items.all():
+                        try:
+                            sku = ProductSKU.objects.select_for_update().get(
+                                product_id=item.product_id, color=item.selected_color, size=item.selected_size
+                            )
+                            sku.stock += item.quantity
+                            sku.save()
+                        except ProductSKU.DoesNotExist:
+                            # 兼容没有SKU的情况
+                            product = Product.objects.select_for_update().get(id=item.product_id)
+                            product.stock += item.quantity
+                            product.save()
+
         # 序列化并返回最新的状态
         serializer = OrderSerializer(orders, many=True)
         return Response(serializer.data)
 
     @transaction.atomic  # 开启数据库事务防错机制
     def post(self, request):
-        """核心：提交订单（结算购物车）"""
+        """核心：提交订单（结算购物车）并扣减库存"""
         data = request.data
         user_id = data.get('user_id')
         address_id = data.get('address_id')
@@ -221,73 +237,120 @@ class OrderView(APIView):
         if not all([user_id, address_id, total_amount, items]):
             return Response({'error': '订单参数不完整'}, status=400)
 
-        # 1. 生成唯一的订单编号
-        time_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
-        order_sn = f"ORD{time_str}{random.randint(1000, 9999)}"
+        try:
+            # 1. 生成唯一的订单编号
+            time_str = datetime.datetime.now().strftime('%Y%m%d%H%M%S')
+            order_sn = f"ORD{time_str}{random.randint(1000, 9999)}"
 
-        # 2. 创建订单主表
-        order = Order.objects.create(
-            user_id=user_id,
-            address_id=address_id,
-            order_sn=order_sn,
-            total_amount=total_amount,
-            status=1  # 1 代表待支付
-        )
-
-        # 3. 循环将购物车商品写入订单明细表，并做清理与记录
-        for item in items:
-            # 兼容前端可能传 null 的情况，强转为空字符串
-            color = item.get('selected_color') or ''
-            size = item.get('selected_size') or ''
-
-            # 3.1 正常写入订单明细
-            OrderItem.objects.create(
-                order=order,
-                product_id=item['product_id'],
-                price=item['price'],
-                quantity=item.get('quantity', 1),
-                selected_color=color,
-                selected_size=size
+            # 2. 创建订单主表
+            order = Order.objects.create(
+                user_id=user_id,
+                address_id=address_id,
+                order_sn=order_sn,
+                total_amount=total_amount,
+                status=1  # 1 代表待支付
             )
 
-            # ==========================================
-            # +++ 核心修复 1：为推荐算法喂入“购买”行为 +++
-            # ==========================================
-            UserBehavior.objects.create(
-                user_id=user_id,
-                product_id=item['product_id'],
-                action_type=4  # 4 代表购买，最高权重！
-            )
+            # 3. 循环将购物车商品写入订单明细表，并做清理与记录
+            for item in items:
+                # 兼容前端可能传 null 的情况，强转为空字符串
+                color = item.get('selected_color') or ''
+                size = item.get('selected_size') or ''
+                quantity = int(item.get('quantity', 1))
+                product_id = item['product_id']
 
-            # ==========================================
-            # +++ 核心修复 2：买完之后，清理购物车对应的商品 +++
-            # ==========================================
-            CartItem.objects.filter(
-                user_id=user_id,
-                product_id=item['product_id'],
-                selected_color=color,
-                selected_size=size
-            ).delete()
+                # +++ 下单扣减：锁定对应的 SKU 行并校验库存 +++
+                try:
+                    sku = ProductSKU.objects.select_for_update().get(
+                        product_id=product_id, color=color, size=size
+                    )
+                    if sku.stock < quantity:
+                        raise Exception(f"手慢了，商品【{sku.product.name} - {color}/{size}】库存不足")
 
-        return Response({'message': '下单成功', 'order_sn': order_sn}, status=200)
+                    sku.stock -= quantity
+                    sku.save()
 
-    # 处理修改订单（取消订单）请求
+                    product = sku.product  # 拿到关联的主商品
+                except ProductSKU.DoesNotExist:
+                    # 兼容：如果没有生成 SKU，就退回到扣减主商品库存
+                    product = Product.objects.select_for_update().get(id=product_id)
+                    if product.stock < quantity:
+                        raise Exception(f"手慢了，商品【{product.name}】库存不足")
+                    product.stock -= quantity
+                    product.save()
+
+                # 3.1 正常写入订单明细
+                OrderItem.objects.create(
+                    order=order,
+                    product=product,  # 这里直接传 product 对象
+                    price=item['price'],
+                    quantity=quantity,
+                    selected_color=color,
+                    selected_size=size
+                )
+
+                # 【+++ 本次新增：执行库存扣减 +++】
+                product.stock -= quantity
+                product.save()
+
+                # 为推荐算法喂入“购买”行为（保留你的原逻辑）
+                UserBehavior.objects.create(
+                    user_id=user_id,
+                    product_id=product_id,
+                    action_type=4  # 4 代表购买，最高权重！
+                )
+
+                # 买完之后，清理购物车对应的商品（保留你的原逻辑）
+                CartItem.objects.filter(
+                    user_id=user_id,
+                    product_id=product_id,
+                    selected_color=color,
+                    selected_size=size
+                ).delete()
+
+            return Response({'message': '下单成功', 'order_sn': order_sn}, status=200)
+
+        except Exception as e:
+            # 捕获库存不足的异常，事务会自动回滚，之前的操作全部撤销
+            return Response({'error': str(e)}, status=400)
+
+    @transaction.atomic  # 手动取消订单也需要保护库存一致性
     def put(self, request):
+        """处理修改订单（取消订单）请求"""
         order_sn = request.data.get('order_sn')
         action = request.data.get('action')  # 获取前端想做的操作，比如 'cancel'
-
         if not order_sn or not action:
             return Response({'error': '缺少必要参数'}, status=400)
-
         try:
             order = Order.objects.get(order_sn=order_sn)
-
             if action == 'cancel':
                 # 限制：只有“待支付(1)”和“待发货(2)”的订单可以被用户手动取消
                 if order.status in [1, 2]:
                     order.status = 5  # 5 代表已取消状态
                     order.save()
-                    return Response({'message': '订单取消成功'})
+
+                    # +++ 手动取消：把库存加回到特定的 SKU 里 +++
+                    for item in order.items.all():
+                        try:
+                            sku = ProductSKU.objects.select_for_update().get(
+                                product_id=item.product_id, color=item.selected_color, size=item.selected_size
+                            )
+                            sku.stock += item.quantity
+                            sku.save()
+                        except ProductSKU.DoesNotExist:
+                            product = Product.objects.select_for_update().get(id=item.product_id)
+                            product.stock += item.quantity
+                            product.save()
+                        # +++ 【本次新增】：撤回算法打分权重（物理删除购买记录） +++
+                        # 必须确保文件顶部已经引入了 UserBehavior 模型！
+                        from products.models import UserBehavior  # 如果已在顶部引入可省略此行
+                        UserBehavior.objects.filter(
+                            user_id=order.user_id,  # 匹配当前下订单的用户
+                            product_id=item.product_id,  # 匹配当前循环到的商品
+                            action_type=4  # 4 代表最高权重的“购买”行为
+                        ).delete()
+
+                    return Response({'message': '订单取消成功，库存已返还'})
                 else:
                     return Response({'error': '当前订单状态不支持取消'}, status=400)
 
@@ -455,3 +518,34 @@ class MessageView(APIView):
             sender_type=sender_type
         )
         return Response({'message': '发送成功'}, status=201)
+
+
+# 关联推荐接口
+# 文件位置：views.py -> 找到 关联推荐接口 (RelatedProductView)
+
+class RelatedProductView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        """获取商品详情页底部的关联推荐"""
+        product_id = request.query_params.get('product_id')
+        if not product_id:
+            return Response({'error': '缺少商品ID'}, status=400)
+
+        # 1. 调用你 algo.py 里的推荐算法
+        related_products = get_related_products(product_id, top_n=4)
+
+        # 2. 如果算法返回为空（新项目常见），则执行兜底逻辑
+        if not related_products.exists():
+            target_product = Product.objects.filter(id=product_id).first()
+            if target_product:
+                # 随机推荐同分类下的其他4件商品
+                related_products = Product.objects.filter(
+                    category=target_product.category
+                ).exclude(id=product_id).order_by('?')[:4]
+            else:
+                related_products = Product.objects.all().order_by('?')[:4]
+
+        serializer = ProductSerializer(related_products, many=True)
+        return Response(serializer.data)
